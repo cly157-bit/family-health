@@ -79,6 +79,7 @@ check_secrets()
 def init_services():
     client = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+    # 預設先建立連線，之後我們會有自動降級/備用模型的機制
     return client, genai.GenerativeModel("gemini-1.5-flash")
 
 supabase, model = init_services()
@@ -99,6 +100,27 @@ def image_to_base64(uploaded_file):
     buffered = io.BytesIO()
     img.save(buffered, format="JPEG", quality=70)
     return f"data:image/jpeg;base64,{base64.b64encode(buffered.getvalue()).decode()}"
+
+# 🎯 智慧型備用與容錯生成引擎：防止因為 404 導致系統崩潰
+def generate_content_with_fallback(inputs):
+    # 依序嘗試的模型名單（AI Studio 最新與最穩定版本）
+    models_to_try = [
+        "gemini-1.5-flash",
+        "gemini-1.5-flash-latest",
+        "gemini-1.5-pro",
+        "gemini-2.5-flash"
+    ]
+    last_error = None
+    for model_name in models_to_try:
+        try:
+            temp_model = genai.GenerativeModel(model_name)
+            response = temp_model.generate_content(inputs)
+            return response, model_name
+        except Exception as e:
+            last_error = e
+            continue
+    # 如果全數失敗，拋出最後一次的錯誤
+    raise last_error
 
 # ------------------------------------------
 # 4. 登入/切換角色頁面
@@ -187,7 +209,8 @@ else:
                         if img_obj: 
                             inputs.append(img_obj)
                         
-                        response = model.generate_content(inputs)
+                        # 呼叫具有備用容錯機制的產生函數
+                        response, actual_model_used = generate_content_with_fallback(inputs)
                         raw_text = response.text.strip()
                         
                         # 清理可能的 markdown 包裝
@@ -200,7 +223,23 @@ else:
                         st.session_state.parsed_results = json.loads(raw_text)
                         st.session_state.raw_val = image_to_base64(uploaded_img) if uploaded_img else user_input
                     except Exception as e:
-                        st.error(f"AI 解析失敗，請描述得更詳細一點並再試一次！錯誤: {e}")
+                        error_msg = str(e)
+                        if "404" in error_msg or "not found" in error_msg:
+                            st.error("""
+                            ⚠️ **AI 解析失敗：您的 API Key 來源或權限不正確 (404 錯誤)**
+                            
+                            這通常是因為您設定的 `GEMINI_API_KEY` 權限與 API 連線點不匹配：
+                            
+                            1. **確認金鑰來源**：請務必至 [Google AI Studio](https://aistudio.google.com/) 申請 **免費的 API Key**。
+                               * *注意：如果您是在 Google Cloud Console (GCP) 中建立的 API 金鑰，呼叫此 SDK 時會回報 404 錯誤。*
+                            2. **重新貼入 Secrets**：
+                               * 進入您 Streamlit Cloud 後台 -> **Manage app** -> **Settings** -> **Secrets**。
+                               * 確保您將 AI Studio 複製出來的 `AIzaSy...` 完整、無空格地貼入：
+                                 `GEMINI_API_KEY = "您的金鑰"` 並存檔。
+                            3. **點擊重啟**：存檔後，在 Streamlit 後台點選 **Reboot app** 即可完美解決！
+                            """)
+                        else:
+                            st.error(f"AI 解析失敗，請描述得更詳細一點並再試一次！錯誤原因: {e}")
 
         # 多卡編輯面板（當 AI 解析完畢後顯示）
         if st.session_state.parsed_results:
@@ -215,7 +254,7 @@ else:
                         food = st.text_input("食物名稱", value=", ".join(res.get("food_items", [])), key=f"f_{i}")
                         c1, c2 = st.columns(2)
                         cal = c1.number_input("預估熱量 (kcal)", value=int(res.get("calories", 0)), key=f"c_{i}")
-                        tip = st.text_input("AI 建議", value=res.get("health_tip", "均衡飲食好健康！"), key=f"t_{i}")
+                        tip = st.text_input("AI 建議", value=res.get("health_tip", "飲食均衡身體棒！"), key=f"t_{i}")
                         
                         # 隱藏在展開欄位中的營養素微調
                         with st.expander(f"📊 微調三大營養素 (飲食 #{i+1})"):
@@ -503,7 +542,7 @@ else:
                         if col1.button("👍 加油", key=f"c1_{log['id']}"): send_cheer("👍")
                         if col2.button("🔥 火熱", key=f"c2_{log['id']}"): send_cheer("🔥")
                         if col3.button("💪 強壯", key=f"c3_{log['id']}"): send_cheer("💪")
-                        if col4.button("❤️ 溫暖", key=f"c4_{log['id']}"): send_cheer("❤️")
+                        if col4.button("❤️ 溫慢", key=f"c4_{log['id']}"): send_cheer("❤️")
                         
                         # 留言板輸入
                         st.markdown("---")
