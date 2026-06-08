@@ -21,7 +21,7 @@ st.set_page_config(
 # 載入極致質感的 CSS 樣式
 st.markdown("""
 <style>
-    @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;700;900&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght=300;400;500;700;900&display=swap');
     html, body, [class*="css"] { font-family: 'Noto Sans TC', sans-serif; }
     
     /* 備份公告樣式 */
@@ -71,7 +71,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ------------------------------------------
-# 2. 初始化 Supabase 與 Gemini 大腦
+# 2. 初始化 Supabase 與 Gemini 基礎配置
 # ------------------------------------------
 @st.cache_resource
 def init_connections():
@@ -87,6 +87,36 @@ try:
 except Exception as e:
     st.error(f"❌ 雲端連線初始化失敗，請確認 Streamlit Secrets 設定！錯誤：{e}")
     st.stop()
+
+# ------------------------------------------
+# 🛠️ 核心防禦：雙向容錯的多重 Gemini 大腦退避機制 (Model Fallback Engine)
+# ------------------------------------------
+def ask_gemini_with_fallback(prompt_text, img=None):
+    # 優先嘗試最推薦模型，若 Google 淘汰或線路繁忙，則往後自動秒速替補
+    models_to_try = [
+        "gemini-2.5-flash",       # 最新生產版
+        "gemini-1.5-flash",       # 經典穩定版
+        "gemini-2.5-pro",         # 高級生產版
+        "gemini-1.5-pro"          # 經典高級版
+    ]
+    
+    last_error = None
+    for model_name in models_to_try:
+        try:
+            model = genai.GenerativeModel(model_name)
+            if img:
+                response = model.generate_content([prompt_text, img])
+            else:
+                response = model.generate_content(prompt_text)
+            
+            # 只要有一個成功，就直接回傳內容
+            return response.text.strip(), model_name
+        except Exception as e:
+            last_error = e
+            continue
+            
+    # 如果全部都失敗，則拋出最後一個錯誤
+    raise Exception(f"所有備用模型呼叫皆失敗，最後錯誤訊息: {last_error}")
 
 # ------------------------------------------
 # 3. 雲端背景設置套用模組
@@ -246,11 +276,8 @@ if menu == "🍎 AI 智慧紀錄":
         st.markdown('</div>', unsafe_allow_html=True)
 
         if btn_analyze and (user_desc.strip() or uploaded_file):
-            with st.spinner("🧠 智慧 AI 正結合營養與健身大腦，極速拆分並估算中..."):
+            with st.spinner("🧠 智慧 AI 正結合優秀營養與健身大腦，極速拆分並估算中..."):
                 try:
-                    # 使用預先定義支持的 Gemini 模組
-                    model = genai.GenerativeModel("gemini-2.5-flash-preview-09-2025")
-                    
                     # 提示詞 (一律拆分成飲食與運動的多卡 JSON 結構)
                     prompt = """
                     你是一位專業的營養師與健身教練。請分析使用者的這段健康描述或照片。
@@ -285,11 +312,12 @@ if menu == "🍎 AI 智慧紀錄":
                         img_base64 = "data:image/jpeg;base64," + base64.b64encode(buffered.getvalue()).decode()
                         st.session_state.image_base64 = img_base64
                         
-                        response = model.generate_content([prompt, img])
+                        # 呼叫帶有自動退避防禦機制的 API 請求
+                        raw_text, used_model = ask_gemini_with_fallback(prompt, img)
                     else:
-                        response = model.generate_content(f"使用者輸入: {user_desc}\n\n{prompt}")
+                        # 呼叫帶有自動退避防禦機制的 API 請求
+                        raw_text, used_model = ask_gemini_with_fallback(f"使用者輸入: {user_desc}\n\n{prompt}")
                     
-                    raw_text = response.text.strip()
                     # 安全解析 JSON 清理
                     if raw_text.startswith("```json"):
                         raw_text = raw_text[7:]
@@ -299,6 +327,7 @@ if menu == "🍎 AI 智慧紀錄":
                     
                     st.session_state.ai_parsed_result = json.loads(raw_text)
                     st.session_state.user_raw_desc = user_desc
+                    st.toast(f"✅ AI 解析成功！(使用的後台引擎：{used_model})")
                     
                 except Exception as e:
                     st.error(f"AI 解析失敗，請再試一次，或改用文字詳細描述。錯誤：{e}")
