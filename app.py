@@ -1,16 +1,15 @@
 import streamlit as st
-import google.generativeai as genai
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime
 import json
 import base64
 from PIL import Image
 import io
-import uuid
+import google.generativeai as genai
 from supabase import create_client
 
 # ------------------------------------------
-# 1. 頁面配置與精美 UI 樣式
+# 1. 頁面基礎配置與精美 UI 樣式
 # ------------------------------------------
 st.set_page_config(
     page_title="小小家庭健康久久",
@@ -19,588 +18,669 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# 自訂 CSS 提升整體視覺質感（包含卡片與電池動畫效果）
+# 載入極致質感的 CSS 樣式
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;700;900&display=swap');
     html, body, [class*="css"] { font-family: 'Noto Sans TC', sans-serif; }
     
-    .health-card {
-        background-color: #ffffff;
-        border-radius: 18px;
-        padding: 18px;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.06);
-        border-left: 6px solid #f43f5e;
-        margin-bottom: 15px;
-    }
-    .exercise-card { border-left: 6px solid #3b82f6; }
-    .metric-val { font-size: 26px; font-weight: 900; color: #f43f5e; }
-    .comment-box {
-        background-color: #f8fafc;
-        border-radius: 10px;
-        padding: 8px 12px;
-        margin-top: 5px;
-        font-size: 13px;
-        display: flex;
-        justify-content: space-between;
+    /* 備份公告樣式 */
+    .pin-notice {
+        background: linear-gradient(135deg, #fffbeb 0%, #fef3c7 100%);
+        border: 2px dashed #f59e0b;
+        border-radius: 20px;
+        padding: 16px;
+        margin-bottom: 20px;
+        box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.05);
     }
     
-    /* 能量電池 UI */
-    .battery-container {
-        border: 4px solid #334155;
-        border-radius: 15px;
-        padding: 3px;
-        background-color: #f1f5f9;
-        width: 100%;
-        max-width: 220px;
-        height: 90px;
-        position: relative;
-        display: flex;
-        align-items: center;
-        margin: 10px auto;
+    /* 飲食健康日誌卡片 */
+    .health-card {
+        background-color: rgba(255, 255, 255, 0.85);
+        backdrop-filter: blur(12px);
+        -webkit-backdrop-filter: blur(12px);
+        border-radius: 24px;
+        padding: 20px;
+        box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.05);
+        border: 1px solid rgba(255, 255, 255, 0.4);
+        border-left: 6px solid #f43f5e;
+        margin-bottom: 18px;
     }
-    .battery-fluid { height: 100%; border-radius: 10px; transition: width 0.6s ease; }
-    .battery-text { position: absolute; width: 100%; text-align: center; font-weight: 900; font-size: 18px; color: #1e293b; }
+    
+    /* 運動健康日誌卡片 */
+    .exercise-card {
+        border-left: 6px solid #3b82f6 !important;
+    }
+    
+    .metric-val {
+        font-size: 24px;
+        font-weight: 900;
+        color: #f43f5e;
+    }
+    
+    /* 玻璃卡片容器 */
+    .glass-container {
+        background: rgba(255, 255, 255, 0.8);
+        backdrop-filter: blur(12px);
+        border-radius: 28px;
+        padding: 22px;
+        border: 1px solid rgba(255, 255, 255, 0.4);
+        box-shadow: 0 10px 25px rgba(0,0,0,0.03);
+    }
 </style>
 """, unsafe_allow_html=True)
 
 # ------------------------------------------
-# 2. 雲端服務連線初始化
+# 2. 初始化 Supabase 與 Gemini 大腦
 # ------------------------------------------
-def check_secrets():
-    for key in ["SUPABASE_URL", "SUPABASE_KEY", "GEMINI_API_KEY"]:
-        if key not in st.secrets:
-            st.error(f"❌ 缺少雲端金鑰：{key}，請在 Streamlit Secrets 中設定。")
-            st.stop()
-
-check_secrets()
-
 @st.cache_resource
-def init_services():
-    client = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
+def init_connections():
+    supabase_url = st.secrets["SUPABASE_URL"]
+    supabase_key = st.secrets["SUPABASE_KEY"]
+    client = create_client(supabase_url, supabase_key)
+    
     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-    # 預設先建立連線，之後我們會有自動降級/備用模型的機制
-    return client, genai.GenerativeModel("gemini-1.5-flash")
+    return client
 
-supabase, model = init_services()
+try:
+    supabase = init_connections()
+except Exception as e:
+    st.error(f"❌ 雲端連線初始化失敗，請確認 Streamlit Secrets 設定！錯誤：{e}")
+    st.stop()
 
 # ------------------------------------------
-# 3. 狀態管理與輔助函式
+# 3. 雲端背景設置套用模組
+# ------------------------------------------
+def apply_cloud_background(bg_base64, opacity):
+    if bg_base64:
+        st.markdown(f"""
+            <style>
+            .stApp {{
+                background-image: linear-gradient(rgba(241, 245, 249, {opacity}), rgba(241, 245, 249, {opacity})), url("{bg_base64}");
+                background-size: cover;
+                background-position: center;
+                background-repeat: no-repeat;
+                background-attachment: fixed;
+            }}
+            </style>
+        """, unsafe_allow_html=True)
+
+# ------------------------------------------
+# 4. 身分驗證與路由控制大腦 (Session State)
 # ------------------------------------------
 if "current_user" not in st.session_state:
     st.session_state.current_user = None
-if "parsed_results" not in st.session_state:
-    st.session_state.parsed_results = []
-if "raw_val" not in st.session_state:
-    st.session_state.raw_val = ""
+if "ai_parsed_result" not in st.session_state:
+    st.session_state.ai_parsed_result = None
+if "active_type" not in st.session_state:
+    st.session_state.active_type = None
+if "image_base64" not in st.session_state:
+    st.session_state.image_base64 = None
+if "user_raw_desc" not in st.session_state:
+    st.session_state.user_raw_desc = None
+if "hide_notice" not in st.session_state:
+    st.session_state.hide_notice = False
 
-def image_to_base64(uploaded_file):
-    img = Image.open(uploaded_file)
-    img.thumbnail((500, 500))  # 智慧型縮圖優化儲存空間
-    buffered = io.BytesIO()
-    img.save(buffered, format="JPEG", quality=70)
-    return f"data:image/jpeg;base64,{base64.b64encode(buffered.getvalue()).decode()}"
+# 讀取 URL 參數
+query_params = st.query_params
 
-# 🎯 智慧型備用與容錯生成引擎：防止因為 404 導致系統崩潰
-def generate_content_with_fallback(inputs):
-    # 依序嘗試的模型名單（AI Studio 最新與最穩定版本）
-    models_to_try = [
-        "gemini-1.5-flash",
-        "gemini-1.5-flash-latest",
-        "gemini-1.5-pro",
-        "gemini-2.5-flash"
-    ]
-    last_error = None
-    for model_name in models_to_try:
-        try:
-            temp_model = genai.GenerativeModel(model_name)
-            response = temp_model.generate_content(inputs)
-            return response, model_name
-        except Exception as e:
-            last_error = e
-            continue
-    # 如果全數失敗，拋出最後一次的錯誤
-    raise last_error
-
-# ------------------------------------------
-# 4. 登入/切換角色頁面
-# ------------------------------------------
-if st.session_state.current_user is None:
-    st.title("❤️ 小小家庭健康久久")
-    st.caption("免註冊！點選您的名字即可開始記錄。")
-    st.markdown("---")
-    
+# 🔒 簡易免密碼自動登入路由
+if "restore_key" in query_params:
+    restore_id = query_params["restore_key"]
     try:
-        res = supabase.table("profiles").select("*").execute()
-        members = res.data if res.data else []
+        fam_res = supabase.table("families").select("*").eq("id", restore_id).execute()
+        if fam_res.data:
+            prof_res = supabase.table("profiles").select("*").eq("family_id", restore_id).execute()
+            if prof_res.data:
+                st.session_state.current_user = prof_res.data[0]
+                st.toast(f"🔑 復活網址讀取成功！歡迎回到【{fam_res.data[0]['family_name']}】")
     except Exception as e:
-        st.error(f"連線資料庫失敗，請確認您的 Supabase 與 Secrets 設定是否正確。錯誤資訊: {e}")
-        st.stop()
-        
-    st.subheader("👪 誰要開始記錄？")
-    if members:
-        cols = st.columns(2)
-        for idx, m in enumerate(members):
-            if cols[idx % 2].button(f"👤 {m['display_name']}", key=f"u_{m['id']}", use_container_width=True):
-                st.session_state.current_user = m
-                st.rerun()
+         st.error(f"鑰匙無效或過期：{e}")
+
+# --- 強制阻擋機制：如果無帳號狀態，顯示登入/註冊畫面 ---
+if not st.session_state.current_user:
+    st.title("❤️ 小小家庭健康久久")
+    st.caption("簡單、溫馨，與家人一起健康生活的點滴日記")
+    
+    tab_login, tab_register = st.tabs(["🔐 舊成員登入", "🆕 創立全新健康小屋"])
+    
+    with tab_login:
+        st.subheader("一鍵安全回娘家")
+        with st.form("quick_login_form"):
+            login_key = st.text_input("請輸入您的家庭復活金鑰 / 代碼", placeholder="例如: 您的家庭UUID")
+            btn_login = st.form_submit_button("進入我的家庭空間 ➔", use_container_width=True)
+            if btn_login and login_key.strip():
+                try:
+                    fam_res = supabase.table("families").select("*").eq("id", login_key.strip()).execute()
+                    if fam_res.data:
+                        prof_res = supabase.table("profiles").select("*").eq("family_id", login_key.strip()).execute()
+                        st.session_state.current_user = prof_res.data[0] if prof_res.data else None
+                        st.success("🎉 認證成功！")
+                        st.rerun()
+                    else:
+                        st.error("找不到此金鑰代碼，請重新確認或使用下方註冊建立新家！")
+                except Exception as e:
+                    st.error(f"登入失敗: {e}")
+                    
+    with tab_register:
+        st.subheader("建立您與家人的獨立看板")
+        with st.form("register_new_family_form"):
+            new_fam_name = st.text_input("1. 請幫您的家庭取個名字", placeholder="例：天母張家、快樂健康基地")
+            creator_name = st.text_input("2. 您的稱呼是什麼？", placeholder="例：爸爸、Leon")
+            btn_register = st.form_submit_button("🚀 建立新家並自動綁定 ➔", use_container_width=True)
+            if btn_register and new_fam_name.strip() and creator_name.strip():
+                try:
+                    # 1. 建立家庭群組
+                    new_code = f"FAM{datetime.now().strftime('%M%S')}"
+                    fam_insert = supabase.table("families").insert({
+                        "family_code": new_code,
+                        "family_name": new_fam_name.strip()
+                    }).execute()
+                    
+                    if fam_insert.data:
+                        new_fam_id = fam_insert.data[0]["id"]
+                        
+                        # 2. 建立預設使用者帳號
+                        mock_auth_id = fam_insert.data[0]["id"] # 使用家庭ID作為首位管理者代碼
+                        profile_insert = supabase.table("profiles").insert({
+                            "id": mock_auth_id,
+                            "family_id": new_fam_id,
+                            "display_name": creator_name.strip()
+                        }).execute()
+                        
+                        if profile_insert.data:
+                            st.session_state.current_user = profile_insert.data[0]
+                            st.success("🎉 家庭建立成功！")
+                            st.rerun()
+                except Exception as e:
+                    st.error(f"建立新家庭失敗：{e}")
+    st.stop()
+
+# ------------------------------------------
+# 5. 身分認證通過，讀取核心家庭背景設定
+# ------------------------------------------
+cur_user = st.session_state.current_user
+cur_fam_id = cur_user["family_id"]
+
+# 讀取家庭詳細資訊 (含背景圖片設定)
+try:
+    family_query = supabase.table("families").select("*").eq("id", cur_fam_id).execute()
+    if family_query.data:
+        cur_fam_info = family_query.data[0]
+        apply_cloud_background(cur_fam_info.get("background_image"), cur_fam_info.get("background_opacity", 0.45))
     else:
-        st.info("💡 目前資料庫中還沒有任何成員，請在下方建立第一個家庭成員！")
-    
-    st.markdown("---")
-    st.subheader("➕ 新增家庭成員")
-    with st.form("add_user"):
-        new_name = st.text_input("成員稱呼 (如：爸爸、媽媽、Lily)")
-        target_cal = st.number_input("每日熱量預算 (kcal)", value=2000, step=100)
-        if st.form_submit_button("確認新增並登入", use_container_width=True) and new_name.strip():
-            try:
-                new_u = supabase.table("profiles").insert({
-                    "display_name": new_name.strip(),
-                    "target_calories": int(target_cal),
-                    "family_id": "00000000-0000-0000-0000-000000000000"
-                }).execute()
-                if new_u.data:
-                    st.session_state.current_user = new_u.data[0]
-                    st.success(f"🎉 成功建立成員：{new_name.strip()}！")
-                    st.rerun()
-            except Exception as e:
-                st.error(f"新增成員失敗，請確認 Supabase 資料表結構。錯誤: {e}")
+        cur_fam_info = {"family_name": "溫馨健康家", "target": 2200}
+except Exception:
+    cur_fam_info = {"family_name": "溫馨健康家", "target": 2200}
 
 # ------------------------------------------
-# 5. 主系統介面
+# 6. 主系統頁面導覽選單
 # ------------------------------------------
-else:
-    cur_user = st.session_state.current_user
+st.sidebar.title("❤️ 小小家庭健康久久")
+st.sidebar.caption(f"👤 目前使用者：**{cur_user['display_name']}**")
+menu = st.sidebar.radio("主選單", ["🍎 AI 智慧紀錄", "📊 熱量與電量收支", "💬 家庭動態牆", "⚙️ 設定與分享"])
+
+# ------------------------------------------
+# 分頁 A：AI 智慧紀錄
+# ------------------------------------------
+if menu == "🍎 AI 智慧紀錄":
+    st.title("🍎 AI 智慧健康紀錄")
+    st.caption("直接輸入您吃的東西、做的運動，大腦會自動為您拆分多張紀錄卡片。")
     
-    with st.sidebar:
-        st.write(f"當前身分：**{cur_user['display_name']}**")
-        if st.button("🔄 切換/登出角色", use_container_width=True):
-            st.session_state.current_user = None
-            st.session_state.parsed_results = []
-            st.rerun()
-        st.markdown("---")
-        # 側邊選單按鈕
-        menu = st.radio("功能導覽", ["📸 AI 智慧紀錄", "⚡ 熱量收支表", "📈 數據報表", "💬 家庭動態牆", "👤 個人設定"])
-
-    # --- 分頁 A: AI 智慧紀錄 ---
-    if menu == "📸 AI 智慧紀錄":
-        st.title("📸 AI 智慧混合紀錄")
-        st.caption("輸入整天做了什麼（文字或照片），AI 會自動拆分為多張卡片！")
+    with st.container():
+        st.markdown('<div class="glass-container">', unsafe_allow_html=True)
+        st.markdown("##### 💡 點選以下快速標籤，秒速測試：")
         
-        user_input = st.text_area("今天吃了什麼、或做了什麼運動？", placeholder="例：早餐吃漢堡配冰紅茶，下午慢跑了30分鐘...", height=100)
-        uploaded_img = st.file_uploader("拍照或上傳今日餐點照片 (選填)", type=["jpg", "png", "jpeg"])
-        
-        if st.button("✨ 送出 AI 智慧分析", use_container_width=True, type="primary"):
-            if not user_input.strip() and not uploaded_img:
-                st.warning("請先輸入文字描述或上傳照片喔！")
-            else:
-                with st.spinner("AI 大腦正在全力分析拆分中..."):
-                    try:
-                        img_obj = Image.open(uploaded_img) if uploaded_img else None
-                        prompt = """
-                        分析輸入內容並拆分為 JSON 列表。格式必須嚴格如下：
-                        [
-                          {"type":"diet","food_items":["食物名稱"],"calories":熱量整數,"protein":蛋白質克數整數,"carbs":碳水克數整數,"fat":脂肪克數整數,"health_tip":"溫馨飲食建議"},
-                          {"type":"exercise","exercise_type":"運動名稱","duration_minutes":運動時間整數,"calories_burned":消耗熱量整數,"tip":"運動提醒勉勵"}
-                        ]
-                        請確保回傳純 JSON，千萬不要包含 ```json 或任何 markdown 標記。
-                        """
-                        inputs = [prompt, user_input]
-                        if img_obj: 
-                            inputs.append(img_obj)
-                        
-                        # 呼叫具有備用容錯機制的產生函數
-                        response, actual_model_used = generate_content_with_fallback(inputs)
-                        raw_text = response.text.strip()
-                        
-                        # 清理可能的 markdown 包裝
-                        if raw_text.startswith("```json"):
-                            raw_text = raw_text[7:]
-                        if raw_text.endswith("```"):
-                            raw_text = raw_text[:-3]
-                        raw_text = raw_text.strip()
-                        
-                        st.session_state.parsed_results = json.loads(raw_text)
-                        st.session_state.raw_val = image_to_base64(uploaded_img) if uploaded_img else user_input
-                    except Exception as e:
-                        error_msg = str(e)
-                        if "404" in error_msg or "not found" in error_msg:
-                            st.error("""
-                            ⚠️ **AI 解析失敗：您的 API Key 來源或權限不正確 (404 錯誤)**
-                            
-                            這通常是因為您設定的 `GEMINI_API_KEY` 權限與 API 連線點不匹配：
-                            
-                            1. **確認金鑰來源**：請務必至 [Google AI Studio](https://aistudio.google.com/) 申請 **免費的 API Key**。
-                               * *注意：如果您是在 Google Cloud Console (GCP) 中建立的 API 金鑰，呼叫此 SDK 時會回報 404 錯誤。*
-                            2. **重新貼入 Secrets**：
-                               * 進入您 Streamlit Cloud 後台 -> **Manage app** -> **Settings** -> **Secrets**。
-                               * 確保您將 AI Studio 複製出來的 `AIzaSy...` 完整、無空格地貼入：
-                                 `GEMINI_API_KEY = "您的金鑰"` 並存檔。
-                            3. **點擊重啟**：存檔後，在 Streamlit 後台點選 **Reboot app** 即可完美解決！
-                            """)
-                        else:
-                            st.error(f"AI 解析失敗，請描述得更詳細一點並再試一次！錯誤原因: {e}")
-
-        # 多卡編輯面板（當 AI 解析完畢後顯示）
-        if st.session_state.parsed_results:
-            st.markdown("---")
-            st.subheader("💡 AI 智慧拆分結果 (可當場直接修改數字)")
+        col_tag1, col_tag2 = st.columns(2)
+        if col_tag1.button("🥪 [快速綜合測試] 早餐麵包咖啡、下午慢跑30分鐘", use_container_width=True):
+            st.session_state.user_raw_desc = "我早餐吃了草莓麵包與中杯美式，下午去跑步三十分鐘。"
+        if col_tag2.button("🚶 [日常飲食運動] 中午吃排骨便當、晚上去散步半小時", use_container_width=True):
+            st.session_state.user_raw_desc = "中午吃了排骨便當，晚上和妹妹散步半小時。"
             
-            with st.form("confirm_logs"):
-                confirmed_list = []
-                for i, res in enumerate(st.session_state.parsed_results):
-                    if res["type"] == "diet":
-                        st.markdown(f"**🍎 飲食項目 #{i+1}**")
-                        food = st.text_input("食物名稱", value=", ".join(res.get("food_items", [])), key=f"f_{i}")
-                        c1, c2 = st.columns(2)
-                        cal = c1.number_input("預估熱量 (kcal)", value=int(res.get("calories", 0)), key=f"c_{i}")
-                        tip = st.text_input("AI 建議", value=res.get("health_tip", "飲食均衡身體棒！"), key=f"t_{i}")
+        user_desc = st.text_area("今天吃了什麼、做什麼運動？", value=st.session_state.user_raw_desc if st.session_state.user_raw_desc else "", placeholder="例如：早餐吃了個草莓麵包，下午去慢跑了 30 分鐘！")
+        
+        # 圖片上傳
+        uploaded_file = st.file_uploader("📸 拍照或上傳飲食食物照片", type=["jpg", "jpeg", "png"])
+        
+        btn_analyze = st.button("✨ 智慧大腦一鍵分析 (飲食 + 運動)", use_container_width=True, type="primary")
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        if btn_analyze and (user_desc.strip() or uploaded_file):
+            with st.spinner("🧠 智慧 AI 正結合營養與健身大腦，極速拆分並估算中..."):
+                try:
+                    # 使用預先定義支持的 Gemini 模組
+                    model = genai.GenerativeModel("gemini-2.5-flash-preview-09-2025")
+                    
+                    # 提示詞 (一律拆分成飲食與運動的多卡 JSON 結構)
+                    prompt = """
+                    你是一位專業的營養師與健身教練。請分析使用者的這段健康描述或照片。
+                    請將它『智慧拆分』成個別獨立的「飲食卡片」與「運動卡片」清單。
+                    請嚴格『只』回傳以下結構的 JSON 格式數據，不要有任何多餘的前言或 Markdown 裝飾文字：
+                    {
+                      "cards": [
+                        {
+                          "type": "diet",
+                          "food_name": "食物項目名稱",
+                          "calories": 估計卡路里數字,
+                          "protein": 估計蛋白質克數,
+                          "carbs": 估計碳水克數,
+                          "fat": 估計脂肪克數,
+                          "tip": "一對一親切健康建議"
+                        },
+                        {
+                          "type": "exercise",
+                          "exercise_name": "運動項目名稱",
+                          "duration_minutes": 運動時長分鐘數字,
+                          "calories_burned": 估算消耗熱量數字,
+                          "tip": "暖心運動勉勵與提醒"
+                        }
+                      ]
+                    }
+                    """
+                    
+                    if uploaded_file:
+                        img = Image.open(uploaded_file)
+                        buffered = io.BytesIO()
+                        img.save(buffered, format="JPEG")
+                        img_base64 = "data:image/jpeg;base64," + base64.b64encode(buffered.getvalue()).decode()
+                        st.session_state.image_base64 = img_base64
                         
-                        # 隱藏在展開欄位中的營養素微調
-                        with st.expander(f"📊 微調三大營養素 (飲食 #{i+1})"):
-                            nc1, nc2, nc3 = st.columns(3)
-                            pro = nc1.number_input("蛋白質 (g)", value=int(res.get("protein", 0)), key=f"pro_{i}")
-                            carb = nc2.number_input("碳水化合物 (g)", value=int(res.get("carbs", 0)), key=f"carb_{i}")
-                            fat_val = nc3.number_input("脂肪 (g)", value=int(res.get("fat", 0)), key=f"fat_{i}")
-                            
-                        confirmed_list.append({
-                            "type": "diet", 
-                            "data": {
-                                "food_items": [f.strip() for f in food.split(",")], 
-                                "calories": cal, 
-                                "health_tip": tip, 
-                                "protein": pro, 
-                                "carbs": carb, 
-                                "fat": fat_val
+                        response = model.generate_content([prompt, img])
+                    else:
+                        response = model.generate_content(f"使用者輸入: {user_desc}\n\n{prompt}")
+                    
+                    raw_text = response.text.strip()
+                    # 安全解析 JSON 清理
+                    if raw_text.startswith("```json"):
+                        raw_text = raw_text[7:]
+                    if raw_text.endswith("```"):
+                        raw_text = raw_text[:-3]
+                    raw_text = raw_text.strip()
+                    
+                    st.session_state.ai_parsed_result = json.loads(raw_text)
+                    st.session_state.user_raw_desc = user_desc
+                    
+                except Exception as e:
+                    st.error(f"AI 解析失敗，請再試一次，或改用文字詳細描述。錯誤：{e}")
+
+        # 顯示 AI 解析後的預覽修改卡片
+        if st.session_state.ai_parsed_result:
+            st.markdown("---")
+            st.subheader("💡 AI 智慧拆分結果 (您可以現場微調修改數字)")
+            
+            cards = st.session_state.ai_parsed_result.get("cards", [])
+            confirmed_cards = []
+            
+            with st.form("confirm_all_cards_form"):
+                for idx, card in enumerate(cards):
+                    c_type = card.get("type", "diet")
+                    
+                    if c_type == "diet":
+                        st.markdown(f"🍎 **卡片 {idx+1}：飲食部分**")
+                        col1, col2, col3, col4, col5 = st.columns(5)
+                        with col1: f_name = st.text_input("食物項目", value=card.get("food_name", "食物"), key=f"f_name_{idx}")
+                        with col2: f_cal = st.number_input("熱量 kcal", value=int(card.get("calories", 0)), key=f"f_cal_{idx}")
+                        with col3: f_pro = st.number_input("蛋白 g", value=int(card.get("protein", 0)), key=f"f_pro_{idx}")
+                        with col4: f_carbs = st.number_input("碳水 g", value=int(card.get("carbs", 0)), key=f"f_carbs_{idx}")
+                        with col5: f_fat = st.number_input("油脂 g", value=int(card.get("fat", 0)), key=f"f_fat_{idx}")
+                        f_tip = st.text_input("AI 建議提示", value=card.get("tip", "無"), key=f"f_tip_{idx}")
+                        
+                        confirmed_cards.append({
+                            "type": "diet",
+                            "parsed_data": {
+                                "food_items": [f_name],
+                                "calories": f_cal, "protein": f_pro, "carbs": f_carbs, "fat": f_fat, "health_tip": f_tip
                             }
                         })
                     else:
-                        st.markdown(f"**🏃 運動項目 #{i+1}**")
-                        ex = st.text_input("運動項目", value=res.get("exercise_type", "運動"), key=f"e_{i}")
-                        c1, c2 = st.columns(2)
-                        duration = c1.number_input("運動時長 (分鐘)", value=int(res.get("duration_minutes", 0)), key=f"dur_{i}")
-                        burn = c2.number_input("消耗熱量 (kcal)", value=int(res.get("calories_burned", 0)), key=f"b_{i}")
-                        ex_tip = st.text_input("AI 提醒", value=res.get("tip", "運動流汗真棒！"), key=f"et_{i}")
+                        st.markdown(f"🏃 **卡片 {idx+1}：運動部分**")
+                        col1, col2, col3 = st.columns(3)
+                        with col1: ex_name = st.text_input("運動項目", value=card.get("exercise_name", "運動"), key=f"ex_name_{idx}")
+                        with col2: ex_dur = st.number_input("時長 (分鐘)", value=int(card.get("duration_minutes", 0)), key=f"ex_dur_{idx}")
+                        with col3: ex_burned = st.number_input("消耗 kcal", value=int(card.get("calories_burned", 0)), key=f"ex_burned_{idx}")
+                        ex_tip = st.text_input("AI 運動勉勵", value=card.get("tip", "無"), key=f"ex_tip_{idx}")
                         
-                        confirmed_list.append({
-                            "type": "exercise", 
-                            "data": {
-                                "exercise_type": ex, 
-                                "duration_minutes": duration,
-                                "calories_burned": burn, 
-                                "tip": ex_tip
+                        confirmed_cards.append({
+                            "type": "exercise",
+                            "parsed_data": {
+                                "exercise_type": ex_name,
+                                "duration_minutes": ex_dur, "calories_burned": ex_burned, "tip": ex_tip
                             }
                         })
+                    st.markdown("---")
                 
-                st.markdown("💬 **貼心提示**：如果數據有偏差，您可以直接在上方打字手動修改數字，點擊儲存將以您的數值為準！")
-                
-                if st.form_submit_button("💾 確定！一口氣全部記下來", use_container_width=True):
+                submitted = st.form_submit_button("💾 確定！一口氣將上述調整後資料儲存", use_container_width=True, type="primary")
+                if submitted:
                     try:
-                        for item in confirmed_list:
+                        for item in confirmed_cards:
                             supabase.table("health_logs").insert({
-                                "user_id": cur_user["id"], 
+                                "user_id": cur_user["id"],
                                 "type": item["type"],
-                                "raw_input": st.session_state.raw_val, 
-                                "parsed_data": item["data"],
-                                "cheers": {}, 
+                                "raw_input": st.session_state.image_base64 if st.session_state.image_base64 else st.session_state.user_raw_desc,
+                                "parsed_data": item["parsed_data"],
+                                "cheers": {},
                                 "comments": []
                             }).execute()
-                        st.success("🎉 所有紀錄已成功同步儲存至雲端家庭動態牆！")
-                        st.session_state.parsed_results = []
-                        st.session_state.raw_val = ""
+                        
+                        st.success("🎉 所有健康日誌已成功儲存至雲端！")
+                        st.session_state.ai_parsed_result = None
+                        st.session_state.image_base64 = None
+                        st.session_state.user_raw_desc = None
                         st.rerun()
                     except Exception as e:
-                        st.error(f"雲端儲存失敗，請重試。錯誤: {e}")
+                        st.error(f"儲存失敗：{e}")
 
-    # --- 分頁 B: 熱量收支表 ---
-    elif menu == "⚡ 熱量收支表":
-        st.title("⚡ 每日卡路里收支看板")
-        st.caption("直覺的「能量電池」看今日餘額，以及「紅綠燈便當」健康分析比例。")
+# ------------------------------------------
+# 分頁 B：熱量與電量收支
+# ------------------------------------------
+elif menu == "📊 熱量與電量收支":
+    st.title("📊 熱量與電量收支")
+    
+    try:
+        logs_res = supabase.table("health_logs").select("*").eq("user_id", cur_user["id"]).execute()
+        total_diet = 0
+        total_exercise = 0
         
-        today = datetime.now().strftime("%Y-%m-%d")
-        try:
-            logs = supabase.table("health_logs").select("*").eq("user_id", cur_user["id"]).gte("logged_at", today).execute().data
-        except:
-            logs = []
-            
-        eat, burn = 0, 0
-        carbs, protein, fat = 0, 0, 0
+        # 營養素比例加總
+        protein_total = 0
+        carbs_total = 0
+        fat_total = 0
         
-        for l in (logs or []):
-            d = l.get("parsed_data", {})
-            if l["type"] == "diet": 
-                eat += d.get("calories", 0)
-                protein += d.get("protein", 0)
-                carbs += d.get("carbs", 0)
-                fat += d.get("fat", 0)
-            elif l["type"] == "exercise": 
-                burn += d.get("calories_burned", 0)
-            
-        net = eat - burn
-        target = cur_user.get("target_calories", 2000)
+        for log in logs_res.data:
+            p_data = log["parsed_data"]
+            if log["type"] == "diet":
+                total_diet += p_data.get("calories", 0)
+                protein_total += p_data.get("protein", 0)
+                carbs_total += p_data.get("carbs", 0)
+                fat_total += p_data.get("fat", 0)
+            else:
+                total_exercise += p_data.get("calories_burned", 0)
+                
+        net_calories = total_diet - total_exercise
+        target_calories = cur_fam_info.get("target", 2200)
+        battery_pct = min(100, max(5, round((net_calories / target_calories) * 100))) if target_calories > 0 else 50
         
-        # 電池進度百分比
-        pct = min(100, max(5, int((net / target) * 100))) if target > 0 else 5
-        color = "linear-gradient(90deg, #ef4444, #b91c1c)" if net > target else "linear-gradient(90deg, #10b981, #059669)"
+        # 🔋 電池能量條視覺化
+        battery_color = "#10b981" # 綠色
+        alert_text = "🔋 電量安全！今日熱量控制在綠色安全區，做得非常完美！"
         
-        st.markdown("### 🔋 今日健康能量電池")
+        if battery_pct > 100:
+            battery_color = "#ef4444" # 紅色
+            alert_text = f"⚠️ 能量過載！您今天攝取的淨熱量多出了 {net_calories - target_calories} kcal，多去走走消電吧！"
+        elif battery_pct > 80:
+            battery_color = "#f59e0b" # 黃色
+            alert_text = "⚠️ 電量偏高！建議晚餐搭配一些輕量慢跑或散步來消耗多餘儲能。"
+
         st.markdown(f"""
-        <div class="battery-container">
-            <div class="battery-fluid" style="width:{pct}%; background:{color};"></div>
-            <div class="battery-text">{net} / {target} kcal</div>
-            <div style="position:absolute; right:-8px; width:6px; height:30px; background:#334155; border-radius:0 4px 4px 0;"></div>
-        </div>
-        <p style="text-align: center; font-size: 13px; color: gray; margin-top: 5px;">目前已消耗電量比：{pct}%</p>
-        """, unsafe_allow_html=True)
-        
-        if net > target:
-            st.warning("⚠️ **能量過載！** 今日攝取的熱量已經超出上限，建議晚餐吃得清淡一些，或多去走走消耗熱量喔！")
-        else:
-            st.success("🔋 **電量安全！** 今日飲食控制得非常理想，請繼續維持健康的生活節奏！")
-            
-        # 🍱 紅綠燈便當圓餅盤 (三大營養素比例)
-        st.markdown("---")
-        st.markdown("### 🍱 今日飲食紅綠燈便當")
-        total_macros = carbs + protein + fat
-        if total_macros > 0:
-            carbs_pct = round((carbs / total_macros) * 100)
-            protein_pct = round((protein / total_macros) * 100)
-            fat_pct = round((fat / total_macros) * 100)
-        else:
-            carbs_pct, protein_pct, fat_pct = 50, 20, 30
-            
-        st.markdown(f"""
-        <div style="background-color: white; padding: 20px; border-radius: 20px; border: 1px solid #e2e8f0; display: flex; align-items: center; justify-content: space-around;">
-            <div style="width: 120px; height: 120px; border-radius: 50%; background: conic-gradient(#fbbf24 0% {carbs_pct}%, #3b82f6 {carbs_pct}% {carbs_pct + protein_pct}%, #ef4444 {carbs_pct + protein_pct}% 100%); display: flex; align-items: center; justify-content: center; box-shadow: inset 0 2px 5px rgba(0,0,0,0.1);">
-                <div style="width: 70px; height: 70px; border-radius: 50%; background-color: white; display: flex; flex-direction: column; align-items: center; justify-content: center;">
-                    <span style="font-size: 10px; color: gray;">總攝取</span>
-                    <strong style="font-size: 14px; color: #334155;">{eat}k</strong>
+        <div class="glass-container" style="text-align: center; margin-bottom: 20px;">
+            <h4 style="margin: 0 0 10px 0; color: gray;">⚡ 您的今日健康能量電池</h4>
+            <div style="display: flex; justify-content: center; margin: 15px 0;">
+                <div style="position: relative; width: 220px; height: 100px; border: 4px solid #334155; border-radius: 22px; padding: 2px; background: #f8fafc; display: flex; align-items: center; overflow: hidden;">
+                    <div style="position: absolute; right: -1px; width: 8px; height: 35px; background: #334155; border-radius: 0 6px 6px 0;"></div>
+                    <div class="battery-fluid" style="height: 100%; width: {battery_pct}%; background: {battery_color}; border-radius: 14px;"></div>
+                    <div style="position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center;">
+                        <span style="font-size: 20px; font-weight: 900; color: #1e293b;">{net_calories} / {target_calories}</span>
+                        <span style="font-size: 9px; font-weight: bold; color: #64748b;">今日淨收支 kcal</span>
+                    </div>
                 </div>
             </div>
-            <div style="font-size: 12px; line-height: 1.8;">
-                <div><span style="display:inline-block; width:12px; height:12px; background-color:#fbbf24; border-radius:50%; margin-right:6px;"></span>澱粉/碳水 (黃燈): <strong>{carbs_pct}%</strong></div>
-                <div><span style="display:inline-block; width:12px; height:12px; background-color:#3b82f6; border-radius:50%; margin-right:6px;"></span>優質蛋白 (藍燈): <strong>{protein_pct}%</strong></div>
-                <div><span style="display:inline-block; width:12px; height:12px; background-color:#ef4444; border-radius:50%; margin-right:6px;"></span>油脂/脂肪 (紅燈): <strong>{fat_pct}%</strong></div>
+            <div style="background-color: {battery_color}15; border: 1px solid {battery_color}30; padding: 12px; border-radius: 16px; font-size: 13px; color: #1e293b;">
+                {alert_text}
             </div>
         </div>
         """, unsafe_allow_html=True)
-
-    # --- 分頁 C: 數據報表 ---
-    elif menu == "📈 數據報表":
-        st.title("📈 歷史數據與統計報表")
-        st.caption("數據化追蹤！自動加總並表格化呈現您的完整健康收支與熱量歷史。")
         
-        period = st.segmented_control("選擇報表週期", ["日報表", "週報表", "月報表"], default="日報表")
-        
-        try:
-            all_logs = supabase.table("health_logs").select("*").eq("user_id", cur_user["id"]).execute().data
-        except:
-            all_logs = []
+        # 🍱 盤子紅綠燈比例圖
+        st.subheader("🍱 今日飲食紅綠燈比例")
+        macronutrient_total = protein_total + carbs_total + fat_total
+        if macronutrient_total > 0:
+            p_pct = round((protein_total / macronutrient_total) * 100)
+            c_pct = round((carbs_total / macronutrient_total) * 100)
+            f_pct = round((fat_total / macronutrient_total) * 100)
             
-        if not all_logs:
-            st.info("💡 目前還沒有任何歷史數據，快去『AI 智慧紀錄』寫下您的第一筆生活日誌吧！")
+            st.markdown(f"""
+            <div class="glass-container" style="display: flex; align-items: center; justify-content: space-around;">
+                <div style="width: 120px; height: 120px; border-radius: 50%; background: conic-gradient(#fcd34d 0% {c_pct}%, #60a5fa {c_pct}% {c_pct+p_pct}%, #f87171 {c_pct+p_pct}% 100%); display: flex; align-items: center; justify-content: center; box-shadow: inset 0 2px 4px rgba(0,0,0,0.06);">
+                    <div style="width: 70px; height: 70px; background: white; border-radius: 50%; display: flex; flex-direction: column; align-items: center; justify-content: center; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1);">
+                        <span style="font-size: 9px; color: gray; font-weight: bold;">總攝取</span>
+                        <span style="font-size: 14px; font-weight: 900; color: #1e293b;">{total_diet}</span>
+                    </div>
+                </div>
+                <div style="font-size: 13px; font-weight: bold; color: #475569;">
+                    <div><span style="display: inline-block; width: 10px; height: 10px; background-color: #fcd34d; border-radius: 50%; margin-right: 8px;"></span>澱粉 (碳水): {c_pct}%</div>
+                    <div style="margin: 4px 0;"><span style="display: inline-block; width: 10px; height: 10px; background-color: #60a5fa; border-radius: 50%; margin-right: 8px;"></span>蛋白: {p_pct}%</div>
+                    <div><span style="display: inline-block; width: 10px; height: 10px; background-color: #f87171; border-radius: 50%; margin-right: 8px;"></span>油脂: {f_pct}%</div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
         else:
-            df_rows = []
-            for l in all_logs:
-                dt_str = l["logged_at"][:10]
-                p_data = l.get("parsed_data", {})
-                is_diet = l["type"] == "diet"
-                
-                df_rows.append({
-                    "date": dt_str,
-                    "type": "diet" if is_diet else "exercise",
-                    "calories": p_data.get("calories", 0) if is_diet else -p_data.get("calories_burned", 0)
-                })
-                
-            base_df = pd.DataFrame(df_rows)
+            st.info("尚無飲食紀錄，請先至 AI 智慧紀錄寫下今天的飲食吧！")
             
-            if period == "日報表":
-                st.markdown("#### 📅 最近 10 天健康收支表")
-                # 分類加總每日數據
-                pivot_df = base_df.groupby(["date", "type"])["calories"].sum().unstack(fill_value=0).reset_index()
-                if "diet" not in pivot_df: pivot_df["diet"] = 0
-                if "exercise" not in pivot_df: pivot_df["exercise"] = 0
-                
-                pivot_df["exercise"] = pivot_df["exercise"].abs()  # 轉回正數以利閱讀
-                pivot_df["net"] = pivot_df["diet"] - pivot_df["exercise"]
-                pivot_df = pivot_df.sort_values("date", ascending=False).head(10)
-                
-                pivot_df.columns = ["日期", "🍴 攝取 (kcal)", "🏃 消耗 (kcal)", "⚖️ 淨額收支"]
-                st.dataframe(pivot_df, use_container_width=True, hide_index=True)
-                
-            elif period == "週報表":
-                st.markdown("#### 📅 週數據加總趨勢")
-                base_df["date_parsed"] = pd.to_datetime(base_df["date"])
-                base_df["週別"] = base_df["date_parsed"].dt.to_period("W").apply(lambda r: f"{r.start.strftime('%m/%d')} ~ {r.end.strftime('%m/%d')}")
-                
-                # 計算飲食與運動
-                base_df["diet_val"] = base_df.apply(lambda r: r["calories"] if r["type"] == "diet" else 0, axis=1)
-                base_df["ex_val"] = base_df.apply(lambda r: abs(r["calories"]) if r["type"] == "exercise" else 0, axis=1)
-                
-                weekly = base_df.groupby("週別").agg({"diet_val": "sum", "ex_val": "sum"}).reset_index()
-                weekly["net"] = weekly["diet_val"] - weekly["ex_val"]
-                weekly = weekly.sort_values("週別", ascending=False)
-                
-                weekly.columns = ["週別區間", "🍴 總攝取 (kcal)", "🏃 總消耗 (kcal)", "⚖️ 淨收支"]
-                st.dataframe(weekly, use_container_width=True, hide_index=True)
-                
+    except Exception as e:
+        st.error(f"載入能量電池失敗：{e}")
+
+# ------------------------------------------
+# 分頁 C：家庭動態牆 (全新加入一鍵 ✕ 關閉公告 + 即時留言板)
+# ------------------------------------------
+elif menu == "💬 家庭動態牆":
+    st.title("💬 家庭健康動態牆")
+    
+    # ✕ 一鍵點擊隱藏置頂公告功能
+    if not st.session_state.hide_notice:
+        restore_url = f"https://family-health-chang.streamlit.app/?restore_key={cur_fam_id}"
+        st.markdown(f"""
+        <div class="pin-notice" style="position: relative;">
+            <div style="display: flex; justify-content: space-between; align-items: flex-start;">
+                <strong>📌 【{cur_fam_info['family_name']}】健康救命備份公告</strong>
+            </div>
+            <p style="font-size:12.5px; color:#475569; margin: 8px 0 0 0;">
+                親愛的家人！萬一哪天手機清空、紀錄不見了，<b>不要緊張！</b><br>
+                點擊下方專屬復活連結，全家人紀錄就會一秒完美歸隊：<br>
+                <a href="{restore_url}" target="_blank" style="word-break:break-all; color:#d97706; font-weight:bold; text-decoration: underline;">{restore_url}</a>
+            </p>
+        </div>
+        """, unsafe_allow_html=True)
+        if st.button("✕ 暫時隱藏此置頂備份公告", key="hide_notice_btn"):
+            st.session_state.hide_notice = True
+            st.rerun()
+
+    st.write("")
+    
+    # 讀取家庭成員清單與所有日誌
+    try:
+        members_res = supabase.table("profiles").select("id, display_name").eq("family_id", cur_fam_id).execute()
+        member_dict = {m["id"]: m["display_name"] for m in members_res.data}
+        member_ids = list(member_dict.keys())
+        
+        if member_ids:
+            logs_res = supabase.table("health_logs").select("*").in_("user_id", member_ids).order("logged_at", desc=True).execute()
+            
+            if not logs_res.data:
+                st.info("目前家庭內還沒有任何日誌，快去寫下第一筆吧！")
             else:
-                st.markdown("#### 📅 月數據歷史加總")
-                base_df["date_parsed"] = pd.to_datetime(base_df["date"])
-                base_df["月份"] = base_df["date_parsed"].dt.strftime("%Y年 %m月")
-                
-                base_df["diet_val"] = base_df.apply(lambda r: r["calories"] if r["type"] == "diet" else 0, axis=1)
-                base_df["ex_val"] = base_df.apply(lambda r: abs(r["calories"]) if r["type"] == "exercise" else 0, axis=1)
-                
-                monthly = base_df.groupby("月份").agg({"diet_val": "sum", "ex_val": "sum"}).reset_index()
-                monthly["net"] = monthly["diet_val"] - monthly["ex_val"]
-                monthly = monthly.sort_values("月份", ascending=False)
-                
-                monthly.columns = ["月份", "🍴 總攝取 (kcal)", "🏃 總消耗 (kcal)", "⚖️ 淨收支"]
-                st.dataframe(monthly, use_container_width=True, hide_index=True)
-
-    # --- 分頁 D: 家庭動態牆 ---
-    elif menu == "💬 家庭動態牆":
-        st.title("💬 家族動態留言牆")
-        st.caption("看看家人的健康好習慣，點選愛心為他們加油，或在留言板留下溫馨鼓勵！")
-        
-        try:
-            # 獲取家庭所有日誌
-            logs = supabase.table("health_logs").select("*").order("logged_at", desc=True).limit(20).execute().data
-            profiles = {p["id"]: p["display_name"] for p in supabase.table("profiles").select("id, display_name").execute().data}
-        except:
-            logs = []
-            profiles = {}
-            
-        if not logs:
-            st.info("💡 目前家庭內還沒有任何健康日誌，快去『AI 智慧紀錄』寫下第一筆吧！")
-        else:
-            for log in logs:
-                name = profiles.get(log["user_id"], "未知成員")
-                is_diet = log["type"] == "diet"
-                log_time = datetime.fromisoformat(log["logged_at"].replace("Z", "+00:00")).strftime("%m/%d %H:%M")
-                
-                with st.container():
+                for log in logs_res.data:
+                    author = member_dict.get(log["user_id"], "新家人")
+                    log_time = datetime.fromisoformat(log["logged_at"].replace("Z", "+00:00")).strftime("%m/%d %H:%M")
+                    
+                    is_diet = log["type"] == "diet"
+                    card_class = "health-card" if is_diet else "health-card exercise-card"
+                    emoji = "🍎 飲食紀錄" if is_diet else "🏃 運動紀錄"
+                    
                     st.markdown(f"""
-                    <div class="health-card {'exercise-card' if not is_diet else ''}">
+                    <div class="{card_class}">
                         <div style="display: flex; justify-content: space-between;">
-                            <strong>👤 {name} ({'🍎 飲食' if is_diet else '🏃 運動'})</strong>
+                            <strong>👤 {author} ({emoji})</strong>
                             <span style="color: gray; font-size: 11px;">{log_time}</span>
                         </div>
-                        <div style="font-size:20px; font-weight:900; color:{'#f43f5e' if is_diet else '#3b82f6'}; margin:8px 0;">
-                            {log['parsed_data'].get('calories', log['parsed_data'].get('calories_burned', 0))} kcal
-                        </div>
+                        <hr style="margin: 8px 0; border: 0; border-top: 1px solid rgba(0,0,0,0.05);">
                     """, unsafe_allow_html=True)
                     
-                    # 顯示原始描述或照片
                     raw_val = log.get("raw_input", "")
                     if raw_val and raw_val.startswith("data:image"):
-                        st.image(raw_val, width=180)
+                        st.image(raw_val, width=150)
                     elif raw_val:
-                        st.write(f"📝 *原始備註: {raw_val}*")
+                        st.write(f"📝 *備註: {raw_val}*")
                         
-                    # 細節與小建议
-                    p_data = log["parsed_data"]
+                    data = log["parsed_data"]
                     if is_diet:
-                        st.write(f"🍲 食物項目：**{', '.join(p_data.get('food_items', []))}**")
-                        st.write(f"💡 *AI 建議：{p_data.get('health_tip', '無')}*")
+                        st.markdown(f"""
+                        <span class="metric-val">{data.get('calories', 0)}</span> kcal | 
+                        🥩 蛋白質 {data.get('protein', 0)}g | 
+                        🍞 碳水 {data.get('carbs', 0)}g | 
+                        🥑 脂肪 {data.get('fat', 0)}g
+                        """, unsafe_allow_html=True)
+                        st.write(f"💡 *AI 建議：{data.get('health_tip', '無')}*")
                     else:
-                        st.write(f"🏃 運動項目：**{p_data.get('exercise_type', '運動')}** (時長 {p_data.get('duration_minutes', 0)} 分鐘)")
-                        st.write(f"✨ *AI 鼓勵：{p_data.get('tip', '無')}*")
+                        st.markdown(f"""
+                        🏃 運動: **{data.get('exercise_type', '運動')}** | 
+                        ⏱️ 時長: **{data.get('duration_minutes', 0)}** 分 | 
+                        🔥 消耗: <span class="metric-val" style="color:#3b82f6;">{data.get('calories_burned', 0)}</span> kcal
+                        """, unsafe_allow_html=True)
+                        st.write(f"✨ *AI 鼓勵：{data.get('tip', '無')}*")
                         
-                    # 顯示加油團 (Cheers)
+                    # 顯示拍手/鼓勵按讚
                     cheers = log.get("cheers", {})
                     if cheers:
-                        cheer_text = " ".join([f"{u}: {emo}" for u, emo in cheers.items()])
-                        st.markdown(f"<div style='background-color:#fff3cd; padding:4px 10px; border-radius:10px; font-size:12px; font-weight: 500;'>💝 家人加油團：{cheer_text}</div>", unsafe_allow_html=True)
-                        
-                    # 顯示留言板串內容
-                    comments = log.get("comments", [])
-                    if comments:
-                        st.markdown("<p style='font-size:11px; font-weight:bold; color:gray; margin-top:10px;'>💬 家族留言：</p>", unsafe_allow_html=True)
-                        for c in comments:
+                        cheer_text = "  ".join([f"{name}: {em}" for name, em in cheers.items()])
+                        st.markdown(f"<div style='background-color:#fff3cd; padding:5px 10px; border-radius:12px; font-size:12px; margin-top: 8px; font-weight: bold;'>💝 家人加油團：{cheer_text}</div>", unsafe_allow_html=True)
+                    
+                    # 💬 顯示留言串 (100% 雲端同步動態顯示)
+                    comments_list = log.get("comments", []) or []
+                    if comments_list:
+                        st.write("")
+                        st.markdown("**💬 家庭留言板**")
+                        for comment in comments_list:
                             st.markdown(f"""
-                            <div class="comment-box">
-                                <span><strong>{c['user']}:</strong> {c['text']}</span>
-                                <span style="color: gray; font-size: 9px;">{c.get('time', '')}</span>
+                            <div style="background-color: rgba(0,0,0,0.02); padding: 6px 12px; border-radius: 12px; border: 1px solid rgba(0,0,0,0.03); margin-bottom: 4px; font-size:12px;">
+                                <strong>{comment['user']}:</strong> {comment['text']} 
+                                <span style="float: right; color: #94a3b8; font-size: 10px;">{comment.get('time', '')}</span>
                             </div>
                             """, unsafe_allow_html=True)
-                    
+
                     st.markdown("</div>", unsafe_allow_html=True)
                     
-                    # 留言與加油按鈕
-                    with st.popover("💬 回覆與鼓勵家人"):
-                        # 加油按鈕
-                        col1, col2, col3, col4 = st.columns(4)
+                    # 留言板發送表單 (修復核心留言 Bug)
+                    with st.expander(f"💬 留言或給 {author} 鼓勵加油"):
+                        # 留言輸入框與傳送按鈕
+                        with st.form(key=f"comment_form_{log['id']}", clear_on_submit=True):
+                            comment_txt = st.text_input("輸入要對家人說的貼心關懷...", key=f"inp_{log['id']}")
+                            if st.form_submit_button("傳送留言", use_container_width=True):
+                                if comment_txt.strip():
+                                    current_time_str = datetime.now().strftime("%H:%M")
+                                    new_comment_obj = {
+                                        "user": cur_user["display_name"],
+                                        "text": comment_txt.strip(),
+                                        "time": current_time_str
+                                    }
+                                    updated_comments = comments_list + [new_comment_obj]
+                                    supabase.table("health_logs").update({"comments": updated_comments}).eq("id", log["id"]).execute()
+                                    st.toast("💬 留言發送成功！")
+                                    st.rerun()
+                        
+                        # 拍手/鼓勵按讚模組
+                        col1, col2, col3, col4, col5 = st.columns(5)
                         cur_name = cur_user["display_name"]
                         
                         def send_cheer(emoji_selected, log_id=log["id"], current_cheers=cheers):
                             current_cheers[cur_name] = emoji_selected
                             supabase.table("health_logs").update({"cheers": current_cheers}).eq("id", log_id).execute()
+                            st.toast(f"已送出 {emoji_selected} 鼓勵！")
                             st.rerun()
                             
-                        if col1.button("👍 加油", key=f"c1_{log['id']}"): send_cheer("👍")
-                        if col2.button("🔥 火熱", key=f"c2_{log['id']}"): send_cheer("🔥")
-                        if col3.button("💪 強壯", key=f"c3_{log['id']}"): send_cheer("💪")
-                        if col4.button("❤️ 溫慢", key=f"c4_{log['id']}"): send_cheer("❤️")
+                        if col1.button("👍", key=f"cheer1_{log['id']}"): send_cheer("👍")
+                        if col2.button("🔥", key=f"cheer2_{log['id']}"): send_cheer("🔥")
+                        if col3.button("💪", key=f"cheer3_{log['id']}"): send_cheer("💪")
+                        if col4.button("❤️", key=f"cheer4_{log['id']}"): send_cheer("❤️")
+                        if col5.button("🌟", key=f"cheer5_{log['id']}"): send_cheer("🌟")
                         
-                        # 留言板輸入
-                        st.markdown("---")
-                        new_comm_text = st.text_input("寫下對家人的關心...", key=f"input_c_{log['id']}")
-                        if st.button("傳送 🚀", key=f"btn_c_{log['id']}"):
-                            if new_comm_text.strip():
-                                current_comments = list(comments) if comments else []
-                                current_comments.append({
-                                    "user": cur_name,
-                                    "text": new_comm_text.strip(),
-                                    "time": datetime.now().strftime("%H:%M")
-                                })
-                                supabase.table("health_logs").update({"comments": current_comments}).eq("id", log["id"]).execute()
-                                st.rerun()
                     st.write("")
+        else:
+            st.info("尚無家庭成員資訊。")
+    except Exception as e:
+        st.error(f"載入動態牆失敗：{e}")
 
-    # --- 分頁 E: 個人設定 ---
-    elif menu == "👤 個人設定":
-        st.title("👤 個人設定中心")
+# ------------------------------------------
+# 分頁 D：設定與分享 (全新背景上傳與透明度滑桿)
+# ------------------------------------------
+elif menu == "⚙️ 設定與分享":
+    st.title("⚙️ 設定與分享中心")
+    
+    # 🎨 1. 家庭空間自訂背景與透明度佈置
+    st.subheader("🎨 家庭空間佈置 (全新功能)")
+    st.caption("上傳您與家人的生活合照，自訂屬於您們獨一無二的溫馨家庭牆背景：")
+    
+    with st.container():
+        st.markdown('<div class="glass-container">', unsafe_allow_html=True)
+        bg_file = st.file_uploader("📸 上傳家庭合照或溫馨背景照片", type=["jpg", "jpeg", "png"], key="bg_uploader")
         
-        # 1. 登錄體重
-        st.subheader("⚖️ 今日體重記錄")
-        try:
-            latest_w_data = supabase.table("weight_logs").select("*").eq("user_id", cur_user["id"]).order("logged_at", desc=True).limit(1).execute().data
-            current_w = float(latest_w_data[0]["weight"]) if latest_w_data else 65.0
-        except:
-            current_w = 65.0
+        # 讀取當前透明度
+        current_opacity = float(cur_fam_info.get("background_opacity", 0.45))
+        bg_opacity_slider = st.slider("背景清透度 (拉桿越右邊，背景照片越鮮色，文字越清亮)", min_value=0.10, max_value=0.95, value=current_opacity, step=0.05)
+        
+        btn_save_bg = st.button("💾 確定套用家庭背景裝飾", use_container_width=True, type="primary")
+        st.markdown('</div>', unsafe_allow_html=True)
+        
+        if btn_save_bg:
+            try:
+                update_payload = {"background_opacity": bg_opacity_slider}
+                
+                # 如果有上傳新背景圖，轉成 Base64 寫入
+                if bg_file:
+                    img = Image.open(bg_file)
+                    buffered = io.BytesIO()
+                    img.save(buffered, format="JPEG")
+                    img_base64_str = "data:image/jpeg;base64," + base64.b64encode(buffered.getvalue()).decode()
+                    update_payload["background_image"] = img_base64_str
+                
+                supabase.table("families").update(update_payload).eq("id", cur_fam_id).execute()
+                st.success("🎨 空間美化裝飾設定成功！正在即時刷新...")
+                st.rerun()
+            except Exception as e:
+                st.error(f"背景設定更新失敗：{e}")
+                
+    st.write("")
+    
+    # 👤 2. 稱呼修改與目標設定
+    st.subheader("👤 個人暱稱與全家目標設定")
+    with st.form("profile_target_form"):
+        new_name = st.text_input("更換您在家人面前的稱呼", value=cur_user["display_name"])
+        new_target = st.number_input("全家每日每人建議熱量目標 (kcal)", value=int(cur_fam_info.get("target", 2200)), step=100)
+        
+        btn_save_profile = st.form_submit_button("儲存暱稱與熱量設定", use_container_width=True)
+        if btn_save_profile:
+            try:
+                # 更新個人暱稱
+                prof_res = supabase.table("profiles").update({"display_name": new_name.strip()}).eq("id", cur_user["id"]).execute()
+                # 更新全家每日目標
+                supabase.table("families").update({"target": new_target}).eq("id", cur_fam_id).execute()
+                
+                if prof_res.data:
+                    st.session_state.current_user = prof_res.data[0]
+                    st.success("設定更新成功！")
+                    st.rerun()
+            except Exception as e:
+                st.error(f"更新設定出錯：{e}")
+
+    st.write("")
+    
+    # 🔑 3. 常駐防護金鑰與雙軌分流分享
+    st.subheader("🔑 常駐防護與分享邀請")
+    st.info(f"🗝️ **家庭專屬復活代碼：** `{cur_fam_id}`\n\n建議將此代碼或復活連結複製存入您的 LINE 群組記事本中！")
+    
+    # 雙軌邀請分流按鈕
+    col_invite1, col_invite2 = st.columns(2)
+    with col_invite1:
+        st.markdown("**🤝 邀請「家人」加入我們家**")
+        st.caption("點開連結後，家人會直接加入目前這個家庭看板共用電池。")
+        invite_url = f"https://family-health-chang.streamlit.app/?family_id={cur_fam_id}&action=bind_family"
+        st.code(invite_url, language="text")
+        if st.button("📋 複製家人邀請網址", key="copy_invite_btn"):
+            st.toast("已複製家人邀請網址！")
             
-        with st.form("weight_log_form"):
-            new_weight = st.number_input("今日體重 (kg)", min_value=1.0, max_value=300.0, value=current_w, step=0.1)
-            submitted_weight = st.form_submit_button("💾 記錄體重並儲存", use_container_width=True)
-            if submitted_weight:
-                try:
-                    supabase.table("weight_logs").insert({
-                        "user_id": cur_user["id"], "weight": new_weight
-                    }).execute()
-                    st.success("🎉 今日體重已成功儲存至雲端資料庫！")
-                except Exception as e:
-                    st.error(f"記錄體重出錯：{e}")
-                    
-        # 2. 修改角色與卡路里目標
-        st.markdown("---")
-        st.subheader("👤 修改目標與名稱")
-        with st.form("profile_update_form"):
-            current_display_name = st.text_input("更換您的稱呼", value=cur_user["display_name"])
-            target_cal_budget = st.number_input("修改每日目標熱量上限 (kcal)", value=int(cur_user.get("target_calories", 2000)), step=100)
-            
-            submitted_profile = st.form_submit_button("💾 儲存修改", use_container_width=True)
-            if submitted_profile:
-                try:
-                    update_res = supabase.table("profiles").update({
-                        "display_name": current_display_name,
-                        "target_calories": int(target_cal_budget)
-                    }).eq("id", cur_user["id"]).execute()
-                    
-                    if update_res.data:
-                        st.success("設定更新成功！")
-                        st.session_state.current_user = update_res.data[0]
-                        st.rerun()
-                except Exception as e:
-                    st.error(f"修改個人設定失敗：{e}")
+    with col_invite2:
+        st.markdown("**🏠 推薦「朋友」創立新家**")
+        st.caption("點開連結後，同事會引導去自己開一間新小屋，完全不帶您的家庭隱私。")
+        recommend_url = "https://family-health-chang.streamlit.app/?action=create_new_family"
+        st.code(recommend_url, language="text")
+        if st.button("📋 複製推薦新家網址", key="copy_recommend_btn"):
+            st.toast("已複製推薦創家網址！")
